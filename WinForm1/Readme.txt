@@ -1,0 +1,1 @@
+﻿Edit Companies.txt to group all files. Seperate all companies names with ",", example (Walmart,Seven Eleven,Invitation Homes)
