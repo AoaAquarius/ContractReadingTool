@@ -22,13 +22,14 @@ namespace WinForm1
         string _excelPath;
         readonly string DEFAULT_COMPANY = "Unknown";
         int _defaultCompanyCount = 1;
-        IList<string> _companies = new List<string>();
-        Dictionary<string, CompanyModel> _companyModels = new Dictionary<string, CompanyModel>();
+        IList<string> _companiesFromSetting;
+        Dictionary<string, CompanyModel> _companyModels;
+        IList<ErrorModel> _errorModels = new List<ErrorModel>();
 
         public Form1()
         {
             InitializeComponent();
-            InitializeDataStructures();
+            //InitializeDataStructures();
         }
 
         private void InitializeDataStructures()
@@ -42,8 +43,7 @@ namespace WinForm1
             string path = $"{Directory.GetCurrentDirectory()}\\{fileName}";
             if (!File.Exists(path))
             {
-                MessageBox.Show("Please make sure you have Companies.txt.");
-                System.Windows.Forms.Application.Exit();
+                txtLog.AppendText("Please make sure you have Companies.txt and predefine some companies.");
             }
             else
             {
@@ -51,7 +51,7 @@ namespace WinForm1
                 string[] companies = text.Split(',');
                 foreach (var company in companies)
                 {
-                    _companies.Add(company.Trim());
+                    _companiesFromSetting.Add(company.Trim());
                 }
             }
         }
@@ -71,7 +71,13 @@ namespace WinForm1
 
         private async void btnSubmit_Click(object sender, EventArgs e)
         {
+            //build up company list
+            _companiesFromSetting = new List<string>();
+            _companyModels = new Dictionary<string, CompanyModel>();
+            ReadCompaniesFromFile();
             //coner case check
+            if (_companiesFromSetting.Count == 0)
+                return;
             if (String.IsNullOrWhiteSpace(this.txtDir.Text))
             {
                 txtLog.AppendText($"\r\nPlease enter a valid directory.");
@@ -91,9 +97,8 @@ namespace WinForm1
             _excelPath = txtDir.Text + "\\output.xlsx";
 
             //preset all data
-            DirectoryInfo d = new DirectoryInfo(this.txtDir.Text);
-            FileInfo[] files = d.GetFiles("*.doc");
-            InitialExcel(_excelPath);
+            IList<FileInfo> files = new List<FileInfo>();
+            GetFilesByBreadthFirstSearch(this.txtDir.Text, files);
 
             //deal with files
             foreach (FileInfo file in files)
@@ -116,16 +121,36 @@ namespace WinForm1
                 txtLog.AppendText("\r\n****************************************************************************************\r\n");
             }
             WriteToExcel(_excelPath);
-            txtLog.AppendText("\r\nJob done.");
+            txtLog.AppendText($"\r\nJob done. Files searched: {files.Count}");
 
             //enable actions
             btnSubmit.Enabled = true;
             btnReset.Enabled = true;
         }
 
+        private void GetFilesByBreadthFirstSearch(string dir, IList<FileInfo> files)
+        {
+            Queue<DirectoryInfo> queue = new Queue<DirectoryInfo>();
+            queue.Enqueue(new DirectoryInfo(dir));
+            while (queue.Count > 0)
+            {
+                DirectoryInfo curDir = queue.Dequeue();
+                IList<FileInfo> curFiles = curDir.GetFiles("*.doc");
+                foreach (FileInfo file in curFiles)
+                {
+                    files.Add(file);
+                }
+                DirectoryInfo[] subDirs = curDir.GetDirectories();
+                foreach (DirectoryInfo subDir in subDirs)
+                {
+                    queue.Enqueue(subDir);
+                }
+            }
+        }
+
         private string GetContractCompanyNameByFileName(string fileName)
         {
-            foreach(string company in _companies)
+            foreach(string company in _companiesFromSetting)
             {
                 if (fileName.Contains(company))
                     return company;
@@ -136,73 +161,77 @@ namespace WinForm1
         private async System.Threading.Tasks.Task ReadDoc(string filePath, string fileName, string key, string company)
         {
             Microsoft.Office.Interop.Word.Application word = new Microsoft.Office.Interop.Word.Application();
-            object miss = System.Reflection.Missing.Value;
-            object path = filePath;
-            object readOnly = true;
-            Microsoft.Office.Interop.Word.Document docs = word.Documents.Open(ref path, ref miss, ref readOnly, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss);
-            int paraCount = 0;
-            FileModel fileModel = new FileModel();
-            fileModel.FileName = fileName;
-            for (int i = 0; i < docs.Paragraphs.Count; i++)
+            try
             {
-                string cur = docs.Paragraphs[i + 1].Range.Text.ToString();
-                if (!ckbCaseSensitive.Checked)
+                object miss = System.Reflection.Missing.Value;
+                object path = filePath;
+                object readOnly = true;
+                Microsoft.Office.Interop.Word.Document docs = word.Documents.Open(ref path, ref miss, ref readOnly, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss, ref miss);
+                int paraCount = 0;
+                FileModel fileModel = new FileModel();
+                fileModel.FileName = fileName;
+                for (int i = 0; i < docs.Paragraphs.Count; i++)
                 {
-                    cur = cur.ToLower();
-                    key = key.ToLower();
+                    string cur = docs.Paragraphs[i + 1].Range.Text.ToString();
+                    if (!ckbCaseSensitive.Checked)
+                    {
+                        cur = cur.ToLower();
+                        key = key.ToLower();
+                    }
+                    if (cur.Contains(key))
+                    {
+                        paraCount++;
+                        txtLog.AppendText($" \r\n{paraCount}. " + docs.Paragraphs[i + 1].Range.Text.ToString() + "\r\n");
+                        fileModel.Paragraphs.Add(docs.Paragraphs[i + 1].Range.Text.ToString());
+                    }
                 }
-                if (cur.Contains(key))
-                {
-                    paraCount++;
-                    txtLog.AppendText($" \r\n{paraCount}. " + docs.Paragraphs[i + 1].Range.Text.ToString() + "\r\n");
-                    fileModel.Paragraphs.Add(docs.Paragraphs[i + 1].Range.Text.ToString());
-                    //WriteToExcel(_excelPath, fileName, docs.Paragraphs[i + 1].Range.Text.ToString(), _fileCount, paraCount);
-                }
+                _companyModels[company].FileModels.Add(fileModel);
+                docs.Close();
             }
-            _companyModels[company].FileModels.Add(fileModel);
-            docs.Close();
-            word.Quit();
+            catch (Exception ex)
+            {
+                _errorModels.Add(new ErrorModel(filePath, ex.Message));
+            }
+            finally
+            {
+                word.Quit();
+            }
         }
 
-        private void InitialExcel(string filePath)
+        private void WriteToExcel(string filePath)
         {
-            //Start Excel and get Application object.
-            Microsoft.Office.Interop.Excel.Application oXL = new Microsoft.Office.Interop.Excel.Application();
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+            Microsoft.Office.Interop.Excel.Application xlApp = new Microsoft.Office.Interop.Excel.Application();
+            xlApp.Visible = false;
+            xlApp.DisplayAlerts = false;
+            _Workbook xlWorkbook = xlApp.Workbooks.Add(Type.Missing);
+            //report
+            _Worksheet xlReportSheet = xlWorkbook.Sheets[1];
+            xlReportSheet.Name = "Report";
+            int row = 1;
+            xlReportSheet.Cells[row++, 1] = $"Error Count: {_errorModels.Count}";
+            xlReportSheet.Cells[row, 1] = "File Name";
+            xlReportSheet.Cells[row, 2] = "Error Message";
+            row++;
+            foreach (ErrorModel error in _errorModels)
+            {
+                xlReportSheet.Cells[row, 1] = error.FileName;
+                xlReportSheet.Cells[row, 2] = error.ErrorMessage;
+                row++;
+            }
 
-            //Get a new workbook.
-            _Workbook xlWorkbook = oXL.Workbooks.Add("");
-            _Worksheet xlWorksheet = xlWorkbook.Sheets[1];
+            //data
+            var xlSheets = xlWorkbook.Sheets as Sheets;
+            _Worksheet xlWorksheet = (Worksheet)xlSheets.Add(xlSheets[1], Type.Missing, Type.Missing, Type.Missing);
+            xlWorksheet.Name = "Data";
             xlWorksheet.Cells[_lastRow, 1] = "Company";
             xlWorksheet.Cells[_lastRow, 3] = "File Name";
             xlWorksheet.Cells[_lastRow, 2] = "Amendment Files";
             xlWorksheet.Cells[_lastRow, 4] = "Paragraph";
             _lastRow++;
-
-            xlWorkbook.SaveAs(filePath, XlFileFormat.xlWorkbookDefault, Type.Missing, Type.Missing,
-                false, false, XlSaveAsAccessMode.xlNoChange,
-                Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing);
-
-            xlWorkbook.Close();
-        }
-
-        //private void WriteToExcel(string filePath, string fileName, string paragraph, int fileCount, int paraCount)
-        //{
-        //    Microsoft.Office.Interop.Excel.Application xlApp = new Microsoft.Office.Interop.Excel.Application();
-        //    _Workbook xlWorkbook = xlApp.Workbooks.Open(filePath);
-        //    _Worksheet xlWorksheet = xlWorkbook.Sheets[1];
-        //    xlWorksheet.Cells[_lastRow, 1] = $"{fileCount}.{paraCount}";
-        //    xlWorksheet.Cells[_lastRow, 2] = fileName;
-        //    xlWorksheet.Cells[_lastRow, 3] = paragraph;
-        //    _lastRow++;
-        //    xlWorkbook.Save();
-        //    xlWorkbook.Close();
-        //}
-
-        private void WriteToExcel(string filePath)
-        {
-            Microsoft.Office.Interop.Excel.Application xlApp = new Microsoft.Office.Interop.Excel.Application();
-            _Workbook xlWorkbook = xlApp.Workbooks.Open(filePath);
-            _Worksheet xlWorksheet = xlWorkbook.Sheets[1];
             foreach (KeyValuePair<string, CompanyModel> entry in _companyModels)
             {
                 xlWorksheet.Cells[_lastRow, 1] = entry.Key;
@@ -222,9 +251,14 @@ namespace WinForm1
                     xlWorksheet.Cells[amendRow++, 2] = amendment;
 
                 _lastRow = Math.Max(paraRow, amendRow);
+                _lastRow++;
             }
-            xlWorkbook.Save();
+
+            xlWorkbook.SaveAs(filePath, XlFileFormat.xlWorkbookDefault, Type.Missing, Type.Missing,
+                false, false, XlSaveAsAccessMode.xlNoChange,
+                Type.Missing, Type.Missing, Type.Missing, Type.Missing, Type.Missing);
             xlWorkbook.Close();
+            xlApp.Quit();
         }
 
     }
